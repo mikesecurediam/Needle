@@ -1,0 +1,41 @@
+SigninLogs
+| where TimeGenerated > ago (24hrs)
+| where ResultType has_any ("50126","50155","50053","53003","50057","50158") or (ResultType == "500121" and Status.additionalDetails contains "MFA denied; user did not respond") or (AuthenticationRequirement =~ "singleFactorAuthentication" and tostring(DeviceDetail.deviceId) == "" and ResultType == "0" and AppDisplayName !~ "Microsoft Account Controls V2") or (ClientAppUsed has_any ("Authenticated SMTP", "Autodiscover", "Exchange ActiveSync", "Exchange Online PowerShell", "Exchange Web Services", "IMAP4", "MAPI over HTTP", "Outlook Anywhere", "Outlook Service", "POP3", "Reporting Web Services", "Other clients") and ResultType == "0") or (Status has "failureReason" and AppDisplayName =~ "OfficeHome" and ResultType != "50140" and NetworkLocationDetails == "[]") 
+// Invalid credentials | failed device auth | (smart)lock out | CA block | disabled account| External MFA failure | Failed MFA | Single factor success on non trusted device and not Microsoft Account Controls V2 | Legacy auth sucess | Failed attempts to Office Home | Remove named networks 
+| extend ResultDetail = case (
+                              ResultType == "50126",
+                             "Invalid credentials - threshold exceeded",
+                             ResultType == "500121",
+                             "MFA failure - threshold exceeded",
+                             ResultType == "50158",
+                             "External MFA challenge not satisfied - threshold exceeded ",
+                             ResultType == "50074",
+                             "MFA Required - threshold exceeded",
+                             ResultType == "50155",
+                             "Device authentication failure - threshold exceeded",
+                             ResultType == "50053",
+                             "Account lockout - threshold exceeded",
+                             ResultType == "53003",
+                             "CA Block - threshold exceeded",
+                             ResultType == "50057",
+                             "Disabled account attempts - threshold exceeded",
+                             AuthenticationRequirement =~ "singleFactorAuthentication" and tostring(DeviceDetail.deviceId) == "" and ResultType == "0",
+                             "Single Factor AuthN on non trusted device - threshold exceeded",
+                             ClientAppUsed has_any ("Other","Autodiscover","MAPI","POP3", "IMAP", "SMTP", "ActiveSync") and ResultType == "0",
+                             "Successful Legacy Auth - threshold exceeded",
+                             Status has "failureReason" and AppDisplayName =~ "OfficeHome",
+                             "OfficeHome failed attempts - threshold exceeded",
+                             "Other"
+                             )
+| summarize count() by bin(TimeGenerated, 30m), UserPrincipalName, ResultType, ResultDetail, ResultDescription
+| join kind= leftouter
+    (
+        SigninLogs
+        | where TimeGenerated > ago (24hrs)
+        | summarize Locations = make_set(LocationDetails.countryOrRegion) by UserPrincipalName
+        | extend MultiLocation = iff((array_length(Locations) > 1), "True", "False")
+        | project Locations, MultiLocation, UserPrincipalName
+) on UserPrincipalName
+| where count_ > 10 // how many times in "30m" does this event need to fire to be projected
+| project TimeGenerated, UserPrincipalName, count_, ResultType, ResultDetail, ResultDescription, MultiLocation, Locations
+| sort by MultiLocation, UserPrincipalName, count_
